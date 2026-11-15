@@ -3,7 +3,7 @@ set -euo pipefail
 
 # On H200, replace this placeholder with your W&B key if the machine is not
 # already logged in. An exported WANDB_API_KEY takes precedence.
-WANDB_API_KEY="${WANDB_API_KEY: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}"
+WANDB_API_KEY="${WANDB_API_KEY:-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}"
 if test "$WANDB_API_KEY" = 'PASTE_YOUR_WANDB_API_KEY_HERE'; then
   unset WANDB_API_KEY
 fi
