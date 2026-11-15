@@ -6,6 +6,9 @@ grid, the same MixTok reconstruction loss recipe, the checkpoint's model/EMA,
 discriminator, both optimizers and LeCam state. No MixTok router or TiTok
 tokenizer is trained here. `train.py` saves `latest.pt` after every epoch.
 
+The first 20 epochs were trained with [`fifichloe/addMixtok`](https://github.com/fifichloe/addMixtok),
+under `llamagen_full_loss/`. This repository contains the continuation code.
+
 The source checkpoint is pinned to
 [`sophiaa/MoT-1-checkpoints/llamagen_full_loss_h200/epoch_20.pt`](https://huggingface.co/sophiaa/MoT-1-checkpoints/tree/main/llamagen_full_loss_h200),
 SHA256 `0911153ac8b0b13db0e528598f618d93a172f91016d97dce5d579db430022e4d`.
@@ -22,6 +25,23 @@ and `LlamaGen` commit `ce98ec41803a74a90ce68c40ababa9eaeffeb4ec`.
 The reconstruction environment needs PyTorch, `omegaconf`, `wandb`,
 `huggingface_hub`, and the pretrained DINOv2, CLIP, ConvNeXt, LPIPS/VGG and
 LlamaGen VQ assets already used in the first 20 epochs.
+
+If the three source trees are absent on H200, clone them into the workspace:
+
+```bash
+export MIXTOK_H200_WORK=/absolute/path/to/existing/workspace
+mkdir -p "$MIXTOK_H200_WORK"
+git clone https://github.com/LCGLiChenge/MixTok.git "$MIXTOK_H200_WORK/MixTok"
+git -C "$MIXTOK_H200_WORK/MixTok" checkout 6623ccdc7a48688497f7b1f312548d1f14107e4d
+git clone https://github.com/bytedance/1d-tokenizer.git "$MIXTOK_H200_WORK/1d-tokenizer"
+git -C "$MIXTOK_H200_WORK/1d-tokenizer" checkout 942a96fbdd873780179d1b78d5462911528bf8c8
+git clone https://github.com/FoundationVision/LlamaGen.git "$MIXTOK_H200_WORK/LlamaGen"
+git -C "$MIXTOK_H200_WORK/LlamaGen" checkout ce98ec41803a74a90ce68c40ababa9eaeffeb4ec
+```
+
+The original setup and asset-download instructions are in
+[`addMixtok/llamagen_full_loss/README.md`](https://github.com/fifichloe/addMixtok/blob/main/llamagen_full_loss/README.md).
+Use that environment and the same ImageNet training directory.
 
 ```bash
 git clone https://github.com/fifichloe/mixtok-llama.git
