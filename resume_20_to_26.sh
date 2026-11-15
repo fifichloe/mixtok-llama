@@ -2,9 +2,23 @@
 set -euo pipefail
 
 # Verified 2026-11-16 with `wandb login --relogin --verify`.
-: "${WANDB_API_KEY:?Set WANDB_API_KEY in the H200 environment before running this script}"
 export WANDB_PROJECT='mixtok-rebuttal'
-wandb login --verify --relogin "$WANDB_API_KEY" >/dev/null
+if test -n "${WANDB_API_KEY:-}"; then
+  wandb login --verify --relogin "$WANDB_API_KEY" >/dev/null
+elif python - <<'PY'
+import netrc
+try:
+    auth = netrc.netrc().authenticators('api.wandb.ai')
+except (FileNotFoundError, netrc.NetrcParseError):
+    auth = None
+raise SystemExit(0 if auth and auth[2] else 1)
+PY
+then
+  printf 'Using the existing W&B login on this machine.\n'
+else
+  printf 'No W&B login found. Set WANDB_API_KEY once on this machine, then rerun.\n' >&2
+  exit 1
+fi
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 work="${MIXTOK_H200_WORK:?Set MIXTOK_H200_WORK to the H200 workspace root}"
