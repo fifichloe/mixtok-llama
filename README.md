@@ -47,8 +47,8 @@ Use that environment and the same ImageNet training directory.
 git clone https://github.com/fifichloe/mixtok-llama.git
 export MIXTOK_H200_WORK=/absolute/path/to/existing/workspace
 export MIXTOK_IMAGENET_TRAIN=/absolute/path/to/ImageNet/train
-# Needed only if H200 has not previously logged in to W&B:
-export WANDB_API_KEY=...  # Keep the key out of Git.
+# If H200 is not already logged in to W&B, edit the key placeholder in
+# resume_20_to_26.sh on H200 (or export WANDB_API_KEY in this shell).
 # Optional: use the checkpoint already present on H200.
 export MIXTOK_LLAMA_E20_CHECKPOINT=/absolute/path/to/epoch_20.pt
 bash mixtok-llama/resume_20_to_26.sh
@@ -64,8 +64,9 @@ and optimizer-step meaning unchanged. Override source and asset locations with
 `MIXTOK_LLAMA_ORIGINAL_CKPT`, `MIXTOK_DINO_REPO`, and `MIXTOK_CLIP_CACHE`.
 
 The launcher uses an existing H200 W&B login automatically. If none exists,
-set `WANDB_API_KEY` once; the launcher then runs `wandb login --verify` and
-stores the login locally, without committing the key to Git. W&B logs the same
+replace `PASTE_YOUR_WANDB_API_KEY_HERE` in the H200 copy of the shell script
+with your W&B key, or export `WANDB_API_KEY`; the launcher then runs
+`wandb login --verify`. Do not commit the filled-in script. W&B logs the same
 training metrics as the first run. If the original `wandb_run_id.txt` is copied
 into the new output directory, logging resumes that run; otherwise a new run
 in project `mixtok-rebuttal` is created.

@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Verified 2026-11-16 with `wandb login --relogin --verify`.
+# On H200, replace this placeholder with your W&B key if the machine is not
+# already logged in. An exported WANDB_API_KEY takes precedence.
+WANDB_API_KEY="${WANDB_API_KEY:-PASTE_YOUR_WANDB_API_KEY_HERE}"
+if test "$WANDB_API_KEY" = 'PASTE_YOUR_WANDB_API_KEY_HERE'; then
+  unset WANDB_API_KEY
+fi
 export WANDB_PROJECT='mixtok-rebuttal'
 if test -n "${WANDB_API_KEY:-}"; then
   wandb login --verify --relogin "$WANDB_API_KEY" >/dev/null
