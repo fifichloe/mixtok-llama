@@ -10,6 +10,7 @@ from pathlib import Path
 import torch
 
 EXPECTED_SHA256 = '0911153ac8b0b13db0e528598f618d93a172f91016d97dce5d579db430022e4d'
+STAGE_NAME = 'mix_tok_top_p_matched_6epoch_no_router'
 REQUIRED = {'model','model_ema','discriminator','optimizer','optimizer_d','lecam_real','lecam_fake'}
 
 
@@ -45,6 +46,9 @@ def main():
     if latest.exists():
         epoch,step=inspect(latest)
         if epoch>19:
+            ckpt=torch.load(latest,map_location='cpu',weights_only=True,mmap=True)
+            if ckpt.get('stage')!=STAGE_NAME or ckpt.get('source_step')!=118620:
+                raise RuntimeError('Existing continuation used another training recipe; select a new output directory')
             print(f'Resuming existing progress: epoch={epoch+1}, step={step}; keeping {latest}',flush=True)
             return
         if sha256(latest)!=EXPECTED_SHA256:

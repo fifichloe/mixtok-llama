@@ -21,6 +21,10 @@ from torch.utils.data import DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
 
 CONFIG = Path(__file__).with_name('loss_config.yaml')
+FINETUNE_CONFIG = Path(__file__).with_name('finetune_6epoch_config.yaml')
+SOURCE_EPOCH = 19
+SOURCE_STEP = 118620
+STAGE_NAME = 'mix_tok_top_p_matched_6epoch_no_router'
 
 
 def atomic_save(payload, path: Path):
@@ -79,9 +83,9 @@ def main():
     p.add_argument('--dino-repo', type=Path, required=True)
     p.add_argument('--clip-cache-dir', type=Path, required=True)
     p.add_argument('--dataset-manifest', type=Path)
-    p.add_argument('--batch-size', type=int, default=8)
-    p.add_argument('--accum', type=int, default=4)
-    p.add_argument('--epochs', type=int, default=20)
+    p.add_argument('--batch-size', type=int, default=20)
+    p.add_argument('--accum', type=int, default=1)
+    p.add_argument('--epochs', type=int, default=26)
     p.add_argument('--max-steps', type=int, default=0)
     p.add_argument('--force-gan', action='store_true', help='Include all losses in short throughput probes.')
     p.add_argument('--workers', type=int, default=4)
@@ -114,6 +118,7 @@ def main():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     config = OmegaConf.to_container(OmegaConf.load(CONFIG), resolve=True)
+    config.update(OmegaConf.to_container(OmegaConf.load(FINETUNE_CONFIG), resolve=True))
     manifest = args_cli.dataset_manifest or args_cli.output / 'dataset_manifest.pt'
     config.update(
         data_path=str(args_cli.data_root.resolve()),
@@ -146,6 +151,11 @@ def main():
         if args_cli.limit_samples > len(dataset):
             raise ValueError('--limit-samples exceeds the dataset size')
         dataset = Subset(dataset, range(args_cli.limit_samples))
+    if not args_cli.max_steps:
+        if (world, args_cli.batch_size, args_cli.accum) != (8, 20, 1):
+            raise ValueError('Matched six-epoch continuation requires eight GPUs, batch 20 per GPU, accumulation 1')
+        if len(dataset) != 1281167:
+            raise ValueError(f'Expected the complete 1,281,167-image training set, got {len(dataset)}')
     sampler = DistributedSampler(dataset, num_replicas=world, rank=rank, shuffle=True, drop_last=True, seed=0) if distributed else None
     loader = DataLoader(dataset, batch_size=args_cli.batch_size, sampler=sampler, shuffle=sampler is None,
                         num_workers=args_cli.workers, pin_memory=True, drop_last=True,
@@ -153,7 +163,11 @@ def main():
     steps_per_epoch = len(loader) // args_cli.accum
     if steps_per_epoch <= 0:
         raise ValueError('Dataset is smaller than one accumulated optimizer step')
-    total_steps = steps_per_epoch * args_cli.epochs
+    if args_cli.epochs != 26:
+        raise ValueError('This continuation must stop after epoch 26 (six fine-tuning epochs)')
+    if not args_cli.max_steps and steps_per_epoch != 8007:
+        raise ValueError(f'Expected 8007 updates per fine-tuning epoch, got {steps_per_epoch}')
+    stage_steps = steps_per_epoch * (args_cli.epochs - SOURCE_EPOCH - 1)
     run = None
     if main_rank and not args_cli.max_steps and args_cli.wandb_mode != 'disabled':
         import wandb
@@ -176,7 +190,8 @@ def main():
                                  'accum': args_cli.accum, 'world_size': world,
                                  'global_batch': world * args_cli.batch_size * args_cli.accum,
                                  'dataset_size': len(dataset),
-                                 'epochs': args_cli.epochs, 'total_steps': total_steps,
+                                 'epochs': args_cli.epochs, 'stage': STAGE_NAME,
+                                 'stage_steps': stage_steps, 'source_step': SOURCE_STEP,
                                  'source_commit': source_commit.stdout.strip() if source_commit.returncode == 0 else 'unknown',
                                  'selected_peak_fraction': selection.get('selected_peak_fraction'),
                                  'probe_gpu_ids': selection.get('gpu_ids'),
@@ -221,15 +236,34 @@ def main():
     latest = args_cli.output / 'latest.pt'
     if latest.exists() and not args_cli.max_steps:
         ckpt = torch.load(latest, map_location='cpu', weights_only=False)
-        model.load_state_dict(ckpt['model'], strict=True)
-        ema.load_state_dict(ckpt['model_ema'], device=device)
-        disc.load_state_dict(ckpt['discriminator'], strict=True)
-        opt.load_state_dict(ckpt['optimizer'])
-        opt_d.load_state_dict(ckpt['optimizer_d'])
         first_epoch = int(ckpt['epoch']) + 1
         step = int(ckpt['step'])
+        if (first_epoch, step) == (SOURCE_EPOCH + 1, SOURCE_STEP):
+            # Match MixTok top_p_train.yaml: initialize the new stage from
+            # the EMA model, reset both optimizers, retain discriminator
+            # weights and LeCam averages, then start a fresh cosine schedule.
+            model.load_state_dict(ckpt['model'], strict=True)
+            if set(ckpt['model_ema']) != {name for name, p in model.named_parameters() if p.requires_grad}:
+                raise RuntimeError('Epoch-20 EMA keys do not match trainable LlamaGen parameters')
+            with torch.no_grad():
+                for name, parameter in model.named_parameters():
+                    if parameter.requires_grad:
+                        parameter.copy_(ckpt['model_ema'][name].to(parameter.device))
+            ema.load_state_dict(ckpt['model_ema'], device=device)
+        else:
+            if ckpt.get('stage') != STAGE_NAME or ckpt.get('source_step') != SOURCE_STEP:
+                raise RuntimeError('Existing checkpoint belongs to a different continuation recipe; use a new output directory')
+            if ckpt.get('stage_steps_per_epoch') != steps_per_epoch or step != SOURCE_STEP + (first_epoch - SOURCE_EPOCH - 1) * steps_per_epoch:
+                raise RuntimeError('Checkpoint step does not match the six-epoch stage batch size')
+            model.load_state_dict(ckpt['model'], strict=True)
+            ema.load_state_dict(ckpt['model_ema'], device=device)
+            opt.load_state_dict(ckpt['optimizer'])
+            opt_d.load_state_dict(ckpt['optimizer_d'])
+        disc.load_state_dict(ckpt['discriminator'], strict=True)
         lecam_real = ckpt['lecam_real'].to(device)
         lecam_fake = ckpt['lecam_fake'].to(device)
+    elif not args_cli.max_steps:
+        raise RuntimeError('The verified epoch-20 checkpoint must be installed before fine-tuning')
     if distributed:
         model_ddp = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
     else:
@@ -237,7 +271,7 @@ def main():
     if main_rank:
         print(f'dataset={len(dataset)} world={world} per_gpu_batch={args_cli.batch_size} accum={args_cli.accum} '
               f'global_batch={world * args_cli.batch_size * args_cli.accum} steps_per_epoch={steps_per_epoch} '
-              f'epochs={args_cli.epochs} total_steps={total_steps} start_step={step}', flush=True)
+              f'epochs={args_cli.epochs} stage_steps={stage_steps} source_step={SOURCE_STEP} start_step={step}', flush=True)
     started = time.monotonic()
     last_logged_at = started
     last_logged_step = step
@@ -245,14 +279,14 @@ def main():
     for epoch in range(first_epoch, args_cli.epochs):
         epoch_started = time.monotonic()
         if sampler is not None:
-            sampler.set_epoch(epoch)
+            sampler.set_epoch(epoch - SOURCE_EPOCH - 1)
         iterator = iter(loader)
         for _epoch_step in range(steps_per_epoch):
             step += 1
             should_log = step <= 2 or step % args_cli.log_every == 0
             metric_sums = {} if should_log else None
             for group in opt.param_groups:
-                group['lr'] = cosine_lr(group['initial_lr'], step - 1, total_steps)
+                group['lr'] = cosine_lr(group['initial_lr'], step - SOURCE_STEP - 1, stage_steps)
             opt.zero_grad(set_to_none=True)
             opt_d.zero_grad(set_to_none=True)
             gan_on = args_cli.force_gan or (epoch + _epoch_step / steps_per_epoch >= cfg.gan_start_epoch)
@@ -342,7 +376,7 @@ def main():
                     now = time.monotonic()
                     metrics.update({
                         'train/epoch': epoch + 1,
-                        'train/progress': step / total_steps,
+                        'train/progress': (step - SOURCE_STEP) / stage_steps,
                         'train/gan_enabled': int(gan_on),
                         'train/discriminator_warmup': int(d_warmup),
                         'train/lr_encoder': opt.param_groups[0]['lr'],
@@ -356,7 +390,7 @@ def main():
                         'system/rank0_peak_reserved_gib': torch.cuda.max_memory_reserved(device) / 2**30,
                     })
                     d_text = f"{metrics['train/loss_d']:.5f}" if gan_on else 'off'
-                    print(f"epoch={epoch + 1} step={step}/{total_steps} loss_g={metrics['train/loss_g']:.5f} "
+                    print(f"epoch={epoch + 1} stage_step={step - SOURCE_STEP}/{stage_steps} loss_g={metrics['train/loss_g']:.5f} "
                           f'loss_d={d_text} elapsed_s={now - started:.1f}', flush=True)
                     if run is not None:
                         run.log(metrics, step=step)
@@ -391,7 +425,9 @@ def main():
                 return
         if main_rank:
             payload = {
-                'epoch': epoch, 'step': step, 'model': model.state_dict(),
+                'epoch': epoch, 'step': step, 'stage': STAGE_NAME,
+                'source_step': SOURCE_STEP, 'stage_steps_per_epoch': steps_per_epoch,
+                'model': model.state_dict(),
                 'model_ema': ema.state_dict(), 'discriminator': disc.state_dict(),
                 'optimizer': opt.state_dict(), 'optimizer_d': opt_d.state_dict(),
                 'lecam_real': lecam_real.detach().cpu(), 'lecam_fake': lecam_fake.detach().cpu(),

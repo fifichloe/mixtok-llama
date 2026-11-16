@@ -34,7 +34,7 @@ llamagen_root="${MIXTOK_LLAMAGEN_ROOT:-$work/LlamaGen}"
 llamagen_ckpt="${MIXTOK_LLAMA_ORIGINAL_CKPT:-$llamagen_root/pretrained_models/vq_ds16_c2i.pt}"
 dino_repo="${MIXTOK_DINO_REPO:-${TORCH_HOME:-$work/.cache/torch}/hub/facebookresearch_dinov2_main}"
 clip_cache="${MIXTOK_CLIP_CACHE:-$work/.cache/open_clip}"
-output="${MIXTOK_LLAMA_RESUME_OUTPUT:-$work/results/llamagen_full_loss_20_to_26}"
+output="${MIXTOK_LLAMA_RESUME_OUTPUT:-$work/results/llamagen_full_loss_top_p_matched_20_to_26}"
 
 for path in "$train_data" "$source_root/train_titok_llamagen_recon.py" \
   "$titok_root/modeling/modules/discriminator.py" "$llamagen_ckpt" \
@@ -64,9 +64,9 @@ PY
 fi
 python "$repo_dir/prepare_resume.py" --checkpoint "$checkpoint" --output "$output"
 
-# The epoch-20 checkpoint has 118620 updates = 20 * 5931. For the full
-# 1,281,167-image train set, 8 GPUs x batch 27 x accumulation 1 gives 5931
-# updates per epoch. Preserve that batch so the saved optimizer step is aligned.
+# The six-epoch MixTok top-p stage uses batch 20 per GPU. The verified source
+# checkpoint has 118620 updates; this stage resets its optimizers and cosine
+# schedule, so the batch can change from the first stage's 27 to 20.
 export CUDA_VISIBLE_DEVICES="${MIXTOK_GPU_IDS:-0,1,2,3,4,5,6,7}"
 if test "$(tr ',' '\n' <<< "$CUDA_VISIBLE_DEVICES" | wc -l)" -ne 8; then
   printf 'Exactly eight GPUs are required to preserve the checkpoint batch.\n' >&2
@@ -84,7 +84,7 @@ python -m torch.distributed.run --standalone --nproc_per_node=8 "$repo_dir/train
   --llamagen-ckpt "$llamagen_ckpt" \
   --dino-repo "$dino_repo" \
   --clip-cache-dir "$clip_cache" \
-  --batch-size 27 --accum 1 --epochs 26 \
+  --batch-size 20 --accum 1 --epochs 26 \
   --workers "${MIXTOK_WORKERS:-4}" \
   --wandb-project "$WANDB_PROJECT" --wandb-mode online \
   2>&1 | tee -a "$output/train.log"
@@ -92,6 +92,7 @@ python -m torch.distributed.run --standalone --nproc_per_node=8 "$repo_dir/train
 python - "$output/latest.pt" <<'PY'
 import sys,torch
 state=torch.load(sys.argv[1],map_location='cpu',weights_only=True,mmap=True)
-assert state['epoch']==25 and state['step']==154206,(state['epoch'],state['step'])
-print('Completed 26 epochs and 154206 optimizer steps; latest.pt contains all training state.')
+assert state['epoch']==25 and state['step']==166662,(state['epoch'],state['step'])
+assert state['stage']=='mix_tok_top_p_matched_6epoch_no_router'
+print('Completed six matched fine-tuning epochs; global step 166662.')
 PY

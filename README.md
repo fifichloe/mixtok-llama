@@ -1,10 +1,13 @@
 # Pure LlamaGen full-loss continuation: epochs 21–26
 
 This resumes the **pure LlamaGen VQ-16 tokenizer** control from the evaluated
-20-epoch H200 checkpoint. It keeps the original LlamaGen model, its 256-token
-grid, the same MixTok reconstruction loss recipe, the checkpoint's model/EMA,
-discriminator, both optimizers and LeCam state. No MixTok router or TiTok
-tokenizer is trained here. `train.py` saves `latest.pt` after every epoch.
+20-epoch H200 checkpoint. The six-epoch stage matches the applicable parts of
+MixTok's `reconstruction/configs/top_p_train.yaml`: it initializes the trainable
+VQ weights from the checkpoint EMA, keeps the discriminator weights and LeCam
+state, resets both optimizers, halves the VQ learning rates, and starts a fresh
+six-epoch cosine schedule. It uses the same reconstruction losses and a batch of
+20 images per GPU. The dense 256-token LlamaGen control has no top-p selector,
+router, or TiTok branch. `train.py` saves `latest.pt` after every epoch.
 
 The first 20 epochs were trained with [`fifichloe/addMixtok`](https://github.com/fifichloe/addMixtok),
 under `llamagen_full_loss/`. This repository contains the continuation code.
@@ -14,7 +17,9 @@ The source checkpoint is pinned to
 SHA256 `0911153ac8b0b13db0e528598f618d93a172f91016d97dce5d579db430022e4d`.
 It records zero-indexed epoch 19 and step 118620. The script verifies the full
 training state before resuming. If an output `latest.pt` is already beyond
-epoch 20, it resumes that newer progress.
+epoch 20, it resumes that newer progress only if it was produced by this
+six-epoch recipe. An older continuation with the 20-epoch recipe must use a
+different output directory and be restarted from the verified epoch-20 source.
 
 ## Run on H200
 
@@ -56,10 +61,11 @@ bash mixtok-llama/resume_20_to_26.sh
 
 If `MIXTOK_LLAMA_E20_CHECKPOINT` is unset, the launcher downloads the exact
 public checkpoint from the pinned Hugging Face revision. It defaults to eight
-GPUs and per-GPU batch 27, accumulation 1. This matches the original checkpoint's
-5931 updates per epoch (20 × 5931 = 118620); the six additional epochs should
-end at step 154206. It deliberately skips a new memory probe to keep the batch
-and optimizer-step meaning unchanged. Override source and asset locations with
+GPUs and per-GPU batch 20, accumulation 1, matching MixTok's six-epoch stage.
+The original checkpoint records 118620 updates; this stage runs 8007 updates
+per epoch on the 1,281,167-image training set and finishes at global step
+166662. The change from the original first-stage batch 27 is intentional because
+the optimizer and learning-rate schedule restart. Override source and asset locations with
 `MIXTOK_SOURCE_ROOT`, `MIXTOK_TITOK_ROOT`, `MIXTOK_LLAMAGEN_ROOT`,
 `MIXTOK_LLAMA_ORIGINAL_CKPT`, `MIXTOK_DINO_REPO`, and `MIXTOK_CLIP_CACHE`.
 
@@ -71,7 +77,9 @@ training metrics as the first run. If the original `wandb_run_id.txt` is copied
 into the new output directory, logging resumes that run; otherwise a new run
 in project `mixtok-rebuttal` is created.
 
-The learning-rate implementation remains cosine. Extending its total horizon
-from 20 to 26 epochs gives a higher learning rate at epoch 21 than the final
-step of the original 20-epoch schedule. The script does not claim a single
-uninterrupted 26-epoch schedule.
+The VQ encoder/quantization-convolution and decoder/post-quantization-convolution
+learning rates start at `1e-7` and `4e-7`, respectively. The discriminator
+learning rate remains `5e-5`; GAN and feature matching are active from the
+first update. The fresh cosine schedule reaches zero after six epochs.
+`finetune_6epoch_config.yaml` records these stage-specific overrides, while
+`loss_config.yaml` preserves the original 20-epoch loss configuration.
